@@ -1,0 +1,7 @@
+flask
+flask-cors
+pymupdf
+pytesseract
+pillow
+google-genai
+gunicorn
