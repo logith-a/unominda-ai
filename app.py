@@ -7,6 +7,7 @@ from PIL import Image
 import io
 import base64
 from google import genai
+from google.genai import types
 import time
 import re
 from datetime import datetime, timedelta
@@ -15,8 +16,16 @@ app = Flask(__name__)
 app.secret_key = 'your-secret-key-here-change-this'
 CORS(app)
 
-# Your special AI key (like a password)
-client = genai.Client(api_key="AIzaSyBqpVmkAu5R5hC2-RwUYse0Umyby87UFuE")
+# 🔑 YOUR NEW API KEY (not leaked!)
+API_KEY = "AIzaSyDvbjZmNrhK8ab1gycZGJrCTMidsRost4s"
+
+# Initialize Gemini client
+try:
+    client = genai.Client(api_key=API_KEY)
+    print("✅ Gemini API configured successfully with new key")
+except Exception as e:
+    print(f"❌ Failed to configure Gemini API: {e}")
+    client = None
 
 class WebPDFChatbot:
     def __init__(self):
@@ -37,7 +46,7 @@ class WebPDFChatbot:
         self.last_topic = ""
         self.load_pdfs()
     
-    # ===== READ PDFs LIKE A BOOK =====
+    # ===== READ PDFs =====
     def extract_text_with_ocr(self, pdf_path):
         doc = fitz.open(pdf_path)
         text_content = ""
@@ -77,7 +86,7 @@ class WebPDFChatbot:
         
         return text_content, pages
     
-    # ===== TAKE PICTURES OUT OF PDFs =====
+    # ===== EXTRACT IMAGES =====
     def extract_actual_images(self, pdf_path, file_name):
         doc = fitz.open(pdf_path)
         images_found = []
@@ -108,12 +117,13 @@ class WebPDFChatbot:
         
         return images_found
     
-    # ===== LOAD ALL PDFs =====
+    # ===== LOAD PDFs =====
     def load_pdfs(self):
         print("📚 Loading PDFs...")
         
         if not os.path.exists(self.pdf_folder):
             os.makedirs(self.pdf_folder)
+            print(f"📁 Created '{self.pdf_folder}' folder")
         
         self.pdf_files = [f for f in os.listdir(self.pdf_folder) if f.lower().endswith('.pdf')]
         
@@ -146,7 +156,7 @@ class WebPDFChatbot:
         
         print(f"✅ Loaded {len(self.pdf_files)} PDFs, {len(self.pages_data)} pages, {len(self.extracted_images)} images")
     
-    # ===== UNDERSTAND WHAT YOU'RE ASKING =====
+    # ===== UNDERSTAND INTENT =====
     def is_greeting(self, text):
         greetings = ['hi', 'hello', 'hey', 'வணக்கம்', 'vanakkam', 'नमस्ते']
         return text.lower().strip() in greetings
@@ -155,11 +165,15 @@ class WebPDFChatbot:
         thanks = ['thank', 'thanks', 'thx', 'நன்றி', 'dhanyavaad']
         return any(word in text.lower() for word in thanks)
     
+    def is_how_are_you(self, text):
+        phrases = ['how are you', 'how r u', 'how do you do']
+        return any(phrase in text.lower() for phrase in phrases)
+    
     def is_image_request(self, text):
         image_words = ['pic', 'picture', 'image', 'photo', 'show', 'படம்', 'காட்டு']
         return any(word in text.lower() for word in image_words)
     
-    # ===== FIND PICTURES =====
+    # ===== FIND IMAGES =====
     def find_relevant_images(self, query, max_images=4):
         if not self.extracted_images:
             return []
@@ -216,14 +230,17 @@ class WebPDFChatbot:
                 return f"📸 Here are {len(images)} images:", img_list
         return "Sorry, no images found.", []
     
-    # ===== SIMPLE ANSWERS =====
+    # ===== SIMPLE RESPONSES =====
     def get_greeting_response(self):
         return "Hi! 👋 How can I help you today?"
+    
+    def get_how_are_you_response(self):
+        return "I'm doing great, thanks for asking! 😊 How can I help you with SMT questions today?"
     
     def get_thanks_response(self):
         return "You're welcome! 😊 Happy to help!"
     
-    # ===== FIGURE OUT WHAT YOU'RE TALKING ABOUT =====
+    # ===== EXTRACT TOPIC =====
     def extract_topic(self, text):
         text_lower = text.lower()
         if 'nwo' in text_lower:
@@ -240,30 +257,41 @@ class WebPDFChatbot:
             return 'wave soldering'
         return ''
     
-    # ===== ANSWER YOUR QUESTION =====
+    # ===== ANSWER QUESTION =====
     def ask(self, question):
         try:
             self.conversation_history.append({"role": "user", "content": question})
             print(f"📝 Question: {question}")
+            
+            # Check if client is available
+            if client is None:
+                return {"answer": "❌ Gemini API not configured. Please check your API key.", "images": []}
             
             topic = self.extract_topic(question)
             if topic:
                 self.last_topic = topic
             print(f"📌 Topic: {self.last_topic}")
             
+            # Handle greetings
             if self.is_greeting(question):
                 return {"answer": self.get_greeting_response(), "images": []}
             
+            # Handle how are you
+            if self.is_how_are_you(question):
+                return {"answer": self.get_how_are_you_response(), "images": []}
+            
+            # Handle thanks
             if self.is_thanks(question):
                 return {"answer": self.get_thanks_response(), "images": []}
             
+            # Handle image requests
             if self.is_image_request(question):
                 images = self.find_relevant_images(question, max_images=4)
                 msg, img_list = self.get_image_response(images, question)
                 return {"answer": msg, "images": img_list}
             
-            # Prepare context from PDFs
-            context = "Here is some information from UNOMINDA manuals (use if helpful):\n\n"
+            # Prepare PDF context
+            context = "Here is information from UNOMINDA manuals:\n\n"
             for i, page in enumerate(self.pages_data[:5]):
                 context += f"[Page {page['page']} from {page['file']}]\n"
                 context += page['text'][:500] + "\n\n"
@@ -273,7 +301,7 @@ class WebPDFChatbot:
             if len(self.conversation_history) > 2:
                 conv_context = "Recent chat:\n"
                 for entry in self.conversation_history[-4:]:
-                    role = "You" if entry["role"] == "user" else "Me"
+                    role = "User" if entry["role"] == "user" else "Assistant"
                     content = entry['content'][:100] + "..." if len(entry['content']) > 100 else entry['content']
                     conv_context += f"{role}: {content}\n"
             
@@ -282,7 +310,7 @@ class WebPDFChatbot:
             if self.last_topic and len(question.split()) <= 3:
                 topic_context = f"They're asking about {self.last_topic}. Answer about that.\n"
             
-            # Language detection (simple)
+            # Language detection
             lang = 'en'
             if re.search(r'[\u0B80-\u0BFF]', question):
                 lang = 'ta'
@@ -302,39 +330,50 @@ RULES:
 2. Be FRIENDLY and use emojis 😊
 3. If info is in the PDFs above, use it
 4. If not in PDFs, use your knowledge to help
-5. NEVER say "I don't know" - always try to help
-6. Keep answers short and sweet
-7. Answer in {'Tamil' if lang == 'ta' else 'Hindi' if lang == 'hi' else 'English'}
+5. Keep answers short and sweet
+6. Answer in {'Tamil' if lang == 'ta' else 'Hindi' if lang == 'hi' else 'English'}
 
 Answer:"""
             
-            models_to_try = ['gemma-3-4b-it', 'gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-2.5-flash']
+            # Try different models
+            models_to_try = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemma-3-4b-it', 'gemini-2.5-flash']
             
             for model_name in models_to_try:
                 try:
                     print(f"🎯 Using {model_name}")
-                    response = client.models.generate_content(model=model_name, contents=prompt)
+                    
+                    # CORRECT SYNTAX for google-genai library
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                    
                     if response and response.text:
                         answer = response.text
                         self.model_stats[model_name]['success'] += 1
                         self.conversation_history.append({"role": "assistant", "content": answer})
                         return {"answer": answer, "images": []}
+                        
                 except Exception as e:
                     self.model_stats[model_name]['failure'] += 1
-                    if "quota" in str(e).lower():
+                    error_str = str(e).lower()
+                    print(f"❌ Error with {model_name}: {str(e)[:200]}")
+                    
+                    if "quota" in error_str or "429" in error_str:
                         print(f"⚠️ Quota exceeded for {model_name}")
                         continue
+                    elif "403" in error_str or "permission" in error_str or "leaked" in error_str:
+                        return {"answer": "⚠️ **API Key Error**: Your Google API key has been leaked/revoked. Please create a new one at https://aistudio.google.com/app/apikey", "images": []}
                     else:
-                        print(f"❌ Error: {str(e)[:100]}")
                         continue
             
-            return {"answer": "I'm here to help! 😊 Could you ask again?", "images": []}
+            return {"answer": "I'm here to help! 😊 Please try asking again.", "images": []}
             
         except Exception as e:
-            print(f"❌ Error: {str(e)}")
+            print(f"❌ Critical error: {str(e)}")
             return {"answer": "I'm here to help! 😊 Something went wrong, but please try again.", "images": []}
 
-# Create your AI friend
+# Initialize chatbot
 chatbot = WebPDFChatbot()
 
 @app.route('/')
@@ -371,21 +410,13 @@ def get_pdfs():
         'total_images': len(chatbot.extracted_images)
     })
 
-@app.route('/api/stats', methods=['GET'])
-def get_stats():
-    return jsonify({
-        'models': chatbot.model_stats,
-        'conversation_count': len(chatbot.conversation_history)
-    })
-
-@app.route('/api/clear', methods=['POST'])
-def clear_conversation():
-    chatbot.conversation_history = []
-    chatbot.last_image_query = ""
-    chatbot.last_topic = ""
-    return jsonify({'success': True})
-
-# IMPORTANT: This is the last line - make it work on Render
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    print("="*70)
+    print("🤖 UNOMINDA AI - LOCAL VERSION")
+    print("="*70)
+    print(f"📊 PDFs: {len(chatbot.pdf_files)} | Pages: {len(chatbot.pages_data)} | Images: {len(chatbot.extracted_images)}")
+    print("="*70)
+    print("✅ NEW API KEY INSTALLED")
+    print("🚀 Server: http://localhost:5000")
+    print("="*70)
+    app.run(host='0.0.0.0', port=5000, debug=True)
